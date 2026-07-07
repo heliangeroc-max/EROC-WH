@@ -233,14 +233,14 @@
 <div class="authOverlay" id="authOverlay">
   <div class="authBox">
     <h2 id="authTitle">邮箱登录</h2>
-    <div class="sub" id="authSub">输入邮箱即可登录，无需密码，操作记录会关联到你的邮箱</div>
-    <div class="field">
+    <div class="sub" id="authSub">输入邮箱，我们会发送一个登录链接到你的邮箱，点击链接即可登录，长期有效</div>
+    <div class="field" id="authEmailWrap">
       <label>邮箱</label>
       <input id="authEmail" type="email" placeholder="例如：zhangwei@company.com">
     </div>
-    <button class="authBtn" id="authSubmit">登录</button>
+    <button class="authBtn" id="authSubmit">发送登录链接</button>
     <div class="authErr" id="authErr"></div>
-    <div class="authNote">本工具用邮箱作为身份标识，方便追溯"谁改了什么"，不做邮箱真实性验证——请勿用于需要严格身份核验的场景。数据保存在共享存储中，所有登录本系统的人都可见。</div>
+    <div class="authNote" id="authNote">登录链接由 Firebase 直接发送到你的邮箱，15 分钟内有效；点击链接会跳回本页面并自动完成登录，登录状态会保留在这台设备/浏览器上，不用每次重新输入。</div>
   </div>
 </div>
 
@@ -345,6 +345,7 @@
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
 import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
+import { getAuth, sendSignInLinkToEmail, isSignInWithEmailLink, signInWithEmailLink, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDaQFJwh4AmdTrZEEj_jOYXe3soPTV74gU",
@@ -356,6 +357,7 @@ const firebaseConfig = {
 };
 const fbApp = initializeApp(firebaseConfig);
 const db = getFirestore(fbApp);
+const auth = getAuth(fbApp);
 
 (function(){
   const WDATA = JSON.parse(document.getElementById('wdata-json').textContent);
@@ -418,13 +420,6 @@ const db = getFirestore(fbApp);
     if(!t) return;
     t.textContent = '⚠ 无法连接数据库，改动可能未保存，请检查网络后重试';
     t.className = 'toast err';
-  }
-  // “记住我的邮箱” — 纯本机浏览器偏好，不需要跨设备同步，用 localStorage 即可
-  function rememberLastUser(name){
-    try{ localStorage.setItem('wms-last-user', name); }catch(e){}
-  }
-  function getLastUser(){
-    try{ return localStorage.getItem('wms-last-user') || ''; }catch(e){ return ''; }
   }
 
   // 实时同步：其他人做的改动会自动推送过来并刷新界面
@@ -595,21 +590,26 @@ const db = getFirestore(fbApp);
     });
   }
 
-  // ---------- auth (邮箱免密码登录) ----------
+  // ---------- auth (Firebase 邮箱链接免密码登录，长期有效) ----------
   const authOverlay = document.getElementById('authOverlay');
   const authErr = document.getElementById('authErr');
   const authSubmit = document.getElementById('authSubmit');
+  const authSub = document.getElementById('authSub');
+  const authEmailWrap = document.getElementById('authEmailWrap');
+  const authNote = document.getElementById('authNote');
 
   function isValidEmail(v){
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
   }
+  function currentPageUrl(){
+    return window.location.origin + window.location.pathname;
+  }
 
-  async function doLogin(email){
+  async function registerAccount(email){
     if(!accounts[email]){
       accounts[email] = { firstSeen: new Date().toLocaleString('zh-CN') };
       await saveAccounts();
     }
-    return true;
   }
 
   authSubmit.addEventListener('click', async () => {
@@ -619,14 +619,43 @@ const db = getFirestore(fbApp);
       authErr.textContent = '请输入有效的邮箱地址';
       return;
     }
-    await doLogin(email);
-    currentUser = email;
-    await rememberLastUser(email);
-    enterApp();
+    authSubmit.disabled = true;
+    authSubmit.textContent = '发送中…';
+    try{
+      const actionCodeSettings = { url: currentPageUrl(), handleCodeInApp: true };
+      await sendSignInLinkToEmail(auth, email, actionCodeSettings);
+      window.localStorage.setItem('emailForSignIn', email);
+      authSub.textContent = `登录链接已发送至 ${email}，请查收邮件（包括垃圾邮件夹）并点击其中的链接完成登录。`;
+      authEmailWrap.style.display = 'none';
+      authSubmit.style.display = 'none';
+      authNote.textContent = '链接 15 分钟内有效。如果没收到，刷新本页面可以重新发送。';
+    }catch(e){
+      console.error(e);
+      authErr.textContent = '发送失败：' + (e.code || e.message || '请检查邮箱地址或稍后再试');
+      authSubmit.disabled = false;
+      authSubmit.textContent = '发送登录链接';
+    }
   });
   document.getElementById('authEmail').addEventListener('keydown', (e) => {
     if(e.key === 'Enter') authSubmit.click();
   });
+
+  async function completeSignInIfNeeded(){
+    if(isSignInWithEmailLink(auth, window.location.href)){
+      let email = window.localStorage.getItem('emailForSignIn');
+      if(!email){
+        email = window.prompt('请输入你登录时使用的邮箱地址以完成登录验证：');
+      }
+      try{
+        await signInWithEmailLink(auth, email, window.location.href);
+        window.localStorage.removeItem('emailForSignIn');
+        window.history.replaceState({}, document.title, currentPageUrl());
+      }catch(e){
+        console.error(e);
+        authErr.textContent = '登录链接无效或已过期，请重新输入邮箱获取新链接';
+      }
+    }
+  }
 
   function enterApp(){
     authOverlay.style.display = 'none';
@@ -635,13 +664,32 @@ const db = getFirestore(fbApp);
     document.getElementById('curUserName').textContent = currentUser;
   }
 
-  document.getElementById('btnLogout').addEventListener('click', () => {
-    currentUser = null;
+  function showLoginScreen(){
+    authOverlay.style.display = 'flex';
     document.getElementById('mainLayout').style.display = 'none';
     document.getElementById('userTag').style.display = 'none';
-    authOverlay.style.display = 'flex';
-    document.getElementById('authEmail').value = '';
+    authEmailWrap.style.display = 'block';
+    authSubmit.style.display = 'block';
+    authSubmit.disabled = false;
+    authSubmit.textContent = '发送登录链接';
+    authSub.textContent = '输入邮箱，我们会发送一个登录链接到你的邮箱，点击链接即可登录，长期有效';
+    authNote.textContent = '登录链接由 Firebase 直接发送到你的邮箱，15 分钟内有效；点击链接会跳回本页面并自动完成登录，登录状态会保留在这台设备/浏览器上，不用每次重新输入。';
     authErr.textContent = '';
+  }
+
+  document.getElementById('btnLogout').addEventListener('click', async () => {
+    try{ await signOut(auth); }catch(e){ console.error(e); }
+  });
+
+  onAuthStateChanged(auth, async (user) => {
+    if(user && user.email){
+      currentUser = user.email;
+      await registerAccount(currentUser);
+      enterApp();
+    } else {
+      currentUser = null;
+      showLoginScreen();
+    }
   });
   function buildZoneOptions(){
     const sels = [document.getElementById('fZone'), document.getElementById('rZone')];
@@ -832,8 +880,7 @@ const db = getFirestore(fbApp);
     refreshAllVisuals();
     renderLog();
     document.getElementById('fOrder').placeholder = nextOrderNo('RK');
-    const last = await getLastUser();
-    if(last) document.getElementById('authEmail').value = last;
+    await completeSignInIfNeeded();
   }
   init();
 })();
