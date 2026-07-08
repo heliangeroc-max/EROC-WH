@@ -345,11 +345,12 @@ const firebaseConfig = {
 };
 const fbApp = initializeApp(firebaseConfig);
 // 部分网络环境（企业防火墙/某些安全软件）会拦截 Firestore 默认的流式连接，
-// 这里开启自动检测长轮询兼容模式，遇到这种网络会自动切换连接方式
+// 这里开启自动检测长轮询兼容模式，遇到这种网络会自动切换连接方式。
+// 另外明确指定数据库 ID 为 'default'，对应 Firebase 控制台里实际创建的那个数据库。
 const db = initializeFirestore(fbApp, {
   experimentalAutoDetectLongPolling: true,
   useFetchStreams: false
-});
+}, 'default');
 
 (function(){
   const WDATA = JSON.parse(document.getElementById('wdata-json').textContent);
