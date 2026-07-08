@@ -333,7 +333,7 @@
 </script>
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
-import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
+import { initializeFirestore, doc, getDoc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDaQFJwh4AmdTrZEEj_jOYXe3soPTV74gU",
@@ -344,7 +344,12 @@ const firebaseConfig = {
   appId: "1:294139303400:web:cbd8b5368e475563a8805d"
 };
 const fbApp = initializeApp(firebaseConfig);
-const db = getFirestore(fbApp);
+// 部分网络环境（企业防火墙/某些安全软件）会拦截 Firestore 默认的流式连接，
+// 这里开启自动检测长轮询兼容模式，遇到这种网络会自动切换连接方式
+const db = initializeFirestore(fbApp, {
+  experimentalAutoDetectLongPolling: true,
+  useFetchStreams: false
+});
 
 (function(){
   const WDATA = JSON.parse(document.getElementById('wdata-json').textContent);
@@ -382,18 +387,28 @@ const db = getFirestore(fbApp);
       log = snap2.exists() ? (snap2.data().entries || []) : [];
     }catch(e){ console.error('loadState(log) failed', e); log = []; }
   }
+  function withTimeout(promise, ms){
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject({ code: 'timeout' }), ms))
+    ]);
+  }
   async function saveStatus(){
-    try{ await setDoc(statusDocRef, { data: status }); }
-    catch(e){ console.error('saveStatus failed', e); showConnErr(); }
+    try{ await withTimeout(setDoc(statusDocRef, { data: status }), 8000); }
+    catch(e){ console.error('saveStatus failed', e); showConnErr(e); }
   }
   async function saveLog(){
-    try{ await setDoc(logDocRef, { entries: log }); }
-    catch(e){ console.error('saveLog failed', e); showConnErr(); }
+    try{ await withTimeout(setDoc(logDocRef, { entries: log }), 8000); }
+    catch(e){ console.error('saveLog failed', e); showConnErr(e); }
   }
-  function showConnErr(){
+  function showConnErr(e){
     const t = document.getElementById('toast');
     if(!t) return;
-    t.textContent = '⚠ 无法连接数据库，改动可能未保存，请检查网络后重试';
+    if(e && e.code === 'timeout'){
+      t.textContent = '⏱ 网络较慢，改动已在本地排队，恢复网络后会自动同步';
+    } else {
+      t.textContent = '⚠ 无法连接数据库，改动可能未保存，请检查网络后重试';
+    }
     t.className = 'toast err';
   }
 
@@ -753,19 +768,23 @@ const db = getFirestore(fbApp);
     const originalText = btn.textContent;
     btn.textContent = '保存中…';
     try{
-      await setDoc(statusDocRef, { data: status });
-      await setDoc(logDocRef, { entries: log });
+      await withTimeout(setDoc(statusDocRef, { data: status }), 8000);
+      await withTimeout(setDoc(logDocRef, { entries: log }), 8000);
       t.textContent = `✓ 已保存（${new Date().toLocaleTimeString('zh-CN')}）`;
       t.className = 'toast ok';
     }catch(e){
       console.error('manual save failed', e);
-      t.textContent = '⚠ 保存失败：' + (e.code || e.message || '请检查网络后重试');
+      if(e && e.code === 'timeout'){
+        t.textContent = '⏱ 网络较慢或暂时离线，改动已在本地排队，网络恢复后会自动同步（不代表保存失败）';
+      } else {
+        t.textContent = '⚠ 保存失败：' + (e.code || e.message || '请检查网络后重试');
+      }
       t.className = 'toast err';
     }
     btn.disabled = false;
     btn.textContent = originalText;
     clearTimeout(t._timer);
-    t._timer = setTimeout(() => { t.className = 'toast'; }, 3500);
+    t._timer = setTimeout(() => { t.className = 'toast'; }, 5000);
   });
 
   document.getElementById('btnExport').addEventListener('click', () => {
