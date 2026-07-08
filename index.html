@@ -188,7 +188,7 @@
     position:fixed; z-index:50; background:#20263380; backdrop-filter:blur(6px);
     background:#20263a; border:1px solid var(--border); border-radius:8px;
     padding:12px 14px; font-size:12.5px; box-shadow:0 8px 24px rgba(0,0,0,0.5);
-    display:none; min-width:180px;
+    display:none; min-width:220px;
   }
   .cellPopover .code{ font-family:var(--mono); font-weight:800; font-size:15px; margin-bottom:6px; }
   .cellPopover .row{ display:flex; justify-content:space-between; margin-bottom:8px; color:var(--muted); }
@@ -226,6 +226,30 @@
     border-radius:5px; padding:4px 9px; cursor:pointer; font-size:11.5px;
   }
   .userTag button:hover{ color:var(--text); border-color:var(--muted2); }
+
+  .mapPane:fullscreen{
+    background:var(--bg);
+    padding:24px;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    overflow:auto;
+  }
+  .mapPane:fullscreen #gridScaleWrapper{
+    display:flex;
+    justify-content:center;
+    align-items:flex-start;
+  }
+  .mapPane:fullscreen .grid{
+    transform-origin: top left;
+  }
+  .mapPane:fullscreen #btnFullscreen{
+    position:fixed; top:20px; right:24px; z-index:200;
+    background:var(--panel2); border-color:var(--muted2);
+  }
+  .mapPane:fullscreen h2{ font-size:20px; }
+  .mapPane:fullscreen .legend{ font-size:14px; margin-bottom:20px; }
+  .mapPane:fullscreen .legend .swatch{ width:16px; height:16px; }
 </style>
 </head>
 <body>
@@ -249,8 +273,13 @@
 </div>
 
 <div class="layout" id="mainLayout">
-  <div class="mapPane">
-    <h2>仓库布局图</h2>
+  <div class="mapPane" id="mapPane">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+      <h2 style="margin:0;">仓库布局图</h2>
+      <button id="btnFullscreen" style="background:transparent; border:1px solid var(--border); color:var(--muted); border-radius:6px; padding:6px 12px; font-size:11.5px; cursor:pointer; display:flex; align-items:center; gap:6px;">
+        <span id="fsIcon">⛶</span> <span id="fsLabel">全屏显示</span>
+      </button>
+    </div>
     <div class="legend">
       <div class="item"><span class="swatch" style="background:var(--free)"></span>空闲库位</div>
       <div class="item"><span class="swatch" style="background:var(--occ)"></span>占用库位</div>
@@ -258,7 +287,7 @@
       <div class="item"><span class="swatch" style="background:var(--aisle);opacity:.55"></span>货架分隔</div>
       <div class="item"><span class="swatch" style="background:var(--func)"></span>功能区域</div>
     </div>
-    <div class="grid" id="grid"></div>
+    <div id="gridScaleWrapper"><div class="grid" id="grid"></div></div>
   </div>
 
   <div class="side">
@@ -276,9 +305,17 @@
         <label>数量（= 占用库位数）</label>
         <input id="fQty" type="number" min="1" value="1">
       </div>
-      <div class="field">
+      <div class="field" id="fZoneWrap">
         <label>指定区域（可留空 = 自动全库分配）</label>
         <select id="fZone"><option value="">不限区域，自动分配</option></select>
+      </div>
+      <div class="field" style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+        <input type="checkbox" id="fManualMode" style="width:auto;">
+        <label for="fManualMode" style="margin:0; cursor:pointer;">手动指定库位（不自动分配）</label>
+      </div>
+      <div class="field" id="fManualCodesWrap" style="display:none;">
+        <label>库位编号（多个用逗号分隔，需与数量一致）</label>
+        <input id="fManualCodes" type="text" placeholder="例如：D1-01,D1-02">
       </div>
       <button class="btn" id="btnAllocate">分配库位</button>
       <div class="toast" id="toast"></div>
@@ -315,6 +352,13 @@
     </div>
 
     <button class="btn" id="btnManualSave" style="margin-bottom:10px;">手动保存</button>
+    <div class="field" style="margin-bottom:8px;">
+      <label>导出语言 / Export Language</label>
+      <select id="exportLang">
+        <option value="zh">中文</option>
+        <option value="en">English</option>
+      </select>
+    </div>
     <button class="btn secondary" id="btnExport">导出库位详情（CSV）</button>
     <button class="btn secondary" id="btnReset" style="margin-top:10px;">重置全部占用状态</button>
     <div class="toast" id="saveToast"></div>
@@ -325,7 +369,15 @@
   <div class="code" id="popCode"></div>
   <div class="row"><span>区域</span><span id="popZone"></span></div>
   <div class="row"><span>状态</span><span id="popStatus"></span></div>
+  <div id="popDetails" style="display:none; margin:-2px 0 8px 0; padding:8px 9px; background:#12161f; border-radius:6px; font-size:11.5px; color:var(--muted); line-height:1.7;"></div>
   <div id="popActions" style="display:flex; flex-direction:column; gap:6px;"></div>
+  <div id="popInboundForm" style="display:none; margin-top:4px;">
+    <input id="popGoods" type="text" placeholder="货物名称 / SKU" style="width:100%; background:#12161f; border:1px solid var(--border); color:var(--text); border-radius:5px; padding:7px 8px; font-size:12.5px; margin-bottom:8px;">
+    <div style="display:flex; gap:6px;">
+      <button id="popInboundConfirm" style="flex:1; background:var(--occ); color:#fff;">确认入库</button>
+      <button id="popInboundCancel" style="flex:1; background:transparent; border:1px solid var(--border); color:var(--muted);">取消</button>
+    </div>
+  </div>
 </div>
 
 <script id="wdata-json" type="application/json">
@@ -501,6 +553,15 @@ const db = initializeFirestore(fbApp, {
     return b;
   }
 
+  function findLatestRecordForCode(code){
+    for(let i = log.length - 1; i >= 0; i--){
+      const r = log[i];
+      const codes = r.codes || (r.code ? [r.code] : []);
+      if(codes.includes(code)) return r;
+    }
+    return null;
+  }
+
   function openPopover(code, ev){
     popCurrentCode = code;
     const st = status[code] || 'free';
@@ -508,8 +569,30 @@ const db = initializeFirestore(fbApp, {
     popZone.textContent = locByCode[code].zone;
     popStatus.textContent = STATUS_LABEL[st];
     popActions.innerHTML = '';
+    hideInboundForm();
+
+    const popDetails = document.getElementById('popDetails');
+    if(st === 'occupied' || st === 'reserved'){
+      const rec = findLatestRecordForCode(code);
+      if(rec){
+        popDetails.innerHTML = `
+          <div><b style="color:var(--text)">${escapeHtml(rec.goods || '（无备注）')}</b></div>
+          <div>单号：${escapeHtml(rec.order || '—')}　订单总数量：${rec.qty != null ? rec.qty : '—'}</div>
+          <div style="color:var(--muted2)">（本库位固定占1个单位；订单总数量是同一单号占用的库位总数）</div>
+          <div>操作人：${escapeHtml(rec.operator || '未填写')}</div>
+          <div>时间：${escapeHtml(rec.time || '—')}</div>
+        `;
+        popDetails.style.display = 'block';
+      } else {
+        popDetails.innerHTML = '（没有找到相关记录，可能是较早期直接切换状态所致）';
+        popDetails.style.display = 'block';
+      }
+    } else {
+      popDetails.style.display = 'none';
+    }
 
     if(st === 'free'){
+      popActions.appendChild(makeActionBtn('手动入库到此库位', 'var(--hazard)', '#1a1400', () => showInboundForm(code)));
       popActions.appendChild(makeActionBtn('标记为占用', 'var(--occ)', '#fff', () => setStatus(code, 'occupied')));
       popActions.appendChild(makeActionBtn('标记为预占用', 'var(--reserve)', '#241a05', () => setStatus(code, 'reserved')));
     } else if(st === 'reserved'){
@@ -522,8 +605,8 @@ const db = initializeFirestore(fbApp, {
     const rect = ev.target.getBoundingClientRect();
     let left = rect.left + 20;
     let top = rect.top;
-    if(left > window.innerWidth - 200) left = window.innerWidth - 210;
-    if(top > window.innerHeight - 150) top = window.innerHeight - 160;
+    if(left > window.innerWidth - 240) left = window.innerWidth - 250;
+    if(top > window.innerHeight - 220) top = window.innerHeight - 230;
     pop.style.left = left + 'px';
     pop.style.top = top + 'px';
     pop.style.display = 'block';
@@ -531,7 +614,57 @@ const db = initializeFirestore(fbApp, {
   document.addEventListener('click', (ev) => {
     if(!pop.contains(ev.target) && !ev.target.classList.contains('loc')){
       pop.style.display = 'none';
+      hideInboundForm();
     }
+  });
+
+  // ---------- 弹窗内嵌的“手动入库到此库位”小表单 ----------
+  const popInboundForm = document.getElementById('popInboundForm');
+  const popGoods = document.getElementById('popGoods');
+  function showInboundForm(code){
+    popActions.style.display = 'none';
+    popInboundForm.style.display = 'block';
+    popGoods.value = '';
+    popGoods.focus();
+  }
+  function hideInboundForm(){
+    popInboundForm.style.display = 'none';
+    popActions.style.display = 'flex';
+  }
+  document.getElementById('popInboundCancel').addEventListener('click', hideInboundForm);
+  popGoods.addEventListener('keydown', (e) => {
+    if(e.key === 'Enter') document.getElementById('popInboundConfirm').click();
+  });
+  document.getElementById('popInboundConfirm').addEventListener('click', async () => {
+    const code = popCurrentCode;
+    const goods = popGoods.value.trim();
+    if(!goods){
+      popGoods.placeholder = '请填写货物名称再确认';
+      popGoods.focus();
+      return;
+    }
+    if(status[code]){
+      // 极端情况下弹窗打开期间被别处改动了状态
+      pop.style.display = 'none';
+      showToast(`${code} 已不是空闲状态，操作已取消`, false);
+      return;
+    }
+    const order = nextOrderNo('RK');
+    status[code] = 'occupied';
+    log.push({
+      id: Date.now(), time: new Date().toLocaleString('zh-CN'),
+      order, goods, qty: 1, zone: locByCode[code].zone, codes: [code],
+      type: '手动入库', operator: currentUser
+    });
+    await saveStatus();
+    await saveLog();
+    refreshLocationVisual(code);
+    updateStats();
+    updateZoneBars();
+    renderLog();
+    pop.style.display = 'none';
+    hideInboundForm();
+    showToast(`已手动入库至 ${code}`, true);
   });
   async function setStatus(code, newStatus){
     const fromLabel = STATUS_LABEL[status[code] || 'free'];
@@ -656,8 +789,9 @@ const db = initializeFirestore(fbApp, {
       const codes = r.codes || (r.code ? [r.code] : []);
       const codesHtml = codes.map(c => `<div>${c}</div>`).join('');
       const isReserve = r.type === '预占用';
-      const isManual = r.type === '手动修改';
-      const typeColor = isReserve ? 'var(--reserve)' : (isManual ? 'var(--accent)' : 'var(--free)');
+      const isManualEdit = r.type === '手动修改';
+      const isManualInbound = r.type === '手动入库';
+      const typeColor = isReserve ? 'var(--reserve)' : (isManualEdit ? 'var(--accent)' : (isManualInbound ? '#5fd0c7' : 'var(--free)'));
       const typeHtml = `<span style="color:${typeColor}; font-weight:700;">${r.type || '入库'}</span>`;
       html += `<tr>
         <td>${escapeHtml(r.order)}</td>
@@ -695,6 +829,17 @@ const db = initializeFirestore(fbApp, {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
+  // ---------- manual mode toggle ----------
+  const fManualMode = document.getElementById('fManualMode');
+  fManualMode.addEventListener('change', () => {
+    document.getElementById('fZoneWrap').style.display = fManualMode.checked ? 'none' : 'block';
+    document.getElementById('fManualCodesWrap').style.display = fManualMode.checked ? 'block' : 'none';
+  });
+
+  function parseManualCodes(text){
+    return text.split(/[,，\s]+/).map(s => s.trim().toUpperCase()).filter(Boolean);
+  }
+
   // ---------- form submit ----------
   document.getElementById('btnAllocate').addEventListener('click', async () => {
     const goods = document.getElementById('fGoods').value.trim();
@@ -706,15 +851,46 @@ const db = initializeFirestore(fbApp, {
       showToast('请填写货物名称 / SKU', false);
       return;
     }
-    const result = findFreeSlots(zone || null, qty);
-    if(!result.ok){
-      const scope = zone ? `${zone} 区域` : '全库';
-      showToast(`${scope}空闲库位不足：需要 ${qty} 个，仅剩 ${result.available} 个`, false);
-      return;
+
+    let codes;
+    if(fManualMode.checked){
+      const inputCodes = parseManualCodes(document.getElementById('fManualCodes').value);
+      if(inputCodes.length === 0){
+        showToast('请填写要手动指定的库位编号', false);
+        return;
+      }
+      if(inputCodes.length !== qty){
+        showToast(`填写的库位数量（${inputCodes.length}个）跟"数量"字段（${qty}）不一致`, false);
+        return;
+      }
+      const notFound = inputCodes.filter(c => !locByCode[c]);
+      if(notFound.length > 0){
+        showToast(`找不到这些库位编号：${notFound.join('、')}`, false);
+        return;
+      }
+      const notFree = inputCodes.filter(c => status[c]);
+      if(notFree.length > 0){
+        showToast(`这些库位当前不是空闲状态，无法入库：${notFree.join('、')}`, false);
+        return;
+      }
+      const dup = inputCodes.filter((c, i) => inputCodes.indexOf(c) !== i);
+      if(dup.length > 0){
+        showToast(`库位编号重复了：${[...new Set(dup)].join('、')}`, false);
+        return;
+      }
+      codes = inputCodes;
+    } else {
+      const result = findFreeSlots(zone || null, qty);
+      if(!result.ok){
+        const scope = zone ? `${zone} 区域` : '全库';
+        showToast(`${scope}空闲库位不足：需要 ${qty} 个，仅剩 ${result.available} 个`, false);
+        return;
+      }
+      codes = result.codes;
     }
-    const codes = result.codes;
+
     codes.forEach(c => { status[c] = 'occupied'; });
-    log.push({id: Date.now(), time: new Date().toLocaleString('zh-CN'), order, goods, qty, zone: zone || '不限', codes, type:'入库', operator: currentUser});
+    log.push({id: Date.now(), time: new Date().toLocaleString('zh-CN'), order, goods, qty, zone: zone || '不限', codes, type: fManualMode.checked ? '手动入库' : '入库', operator: currentUser});
     await saveStatus();
     await saveLog();
     codes.forEach(c => refreshLocationVisual(c));
@@ -726,6 +902,7 @@ const db = initializeFirestore(fbApp, {
     document.getElementById('fOrder').value = '';
     document.getElementById('fGoods').value = '';
     document.getElementById('fQty').value = 1;
+    document.getElementById('fManualCodes').value = '';
   });
 
   // ---------- reserve (预占用) submit ----------
@@ -789,6 +966,7 @@ const db = initializeFirestore(fbApp, {
   });
 
   document.getElementById('btnExport').addEventListener('click', () => {
+    const lang = document.getElementById('exportLang').value;
     // 找每个库位最近一次相关的记录（用于填充占用/预占用库位的货物、单号等信息）
     const latestByCode = {};
     log.forEach(r => {
@@ -796,26 +974,37 @@ const db = initializeFirestore(fbApp, {
       codes.forEach(c => { latestByCode[c] = r; });
     });
 
-    const STATUS_TEXT = { occupied: '占用', reserved: '预占用' };
-    const headers = ['区域', '库位编号', '状态', '关联单号', '记录类型', '货物/备注', '数量', '操作人', '记录时间'];
+    const STATUS_TEXT = lang === 'en'
+      ? { occupied: 'Occupied', reserved: 'Reserved' }
+      : { occupied: '占用', reserved: '预占用' };
+    const FREE_TEXT = lang === 'en' ? 'Free' : '空闲';
+    const TYPE_TEXT = lang === 'en'
+      ? { '入库': 'Inbound', '预占用': 'Reserved', '手动入库': 'Manual Inbound', '手动修改': 'Manual Edit' }
+      : {};
+
+    const headers = lang === 'en'
+      ? ['Zone', 'Location Code', 'Status', 'Order No.', 'Record Type', 'Goods / Note', 'Qty (This Location)', 'Order Total Qty', 'Operator', 'Timestamp']
+      : ['区域', '库位编号', '状态', '关联单号', '记录类型', '货物/备注', '数量（本库位）', '关联订单总数量', '操作人', '记录时间'];
     const rows = [headers];
 
     LOCATIONS.forEach(l => {
       const st = status[l.code];
-      const stText = STATUS_TEXT[st] || '空闲';
-      let order = '', type = '', goods = '', qty = '', operator = '', time = '';
+      const stText = STATUS_TEXT[st] || FREE_TEXT;
+      let order = '', type = '', goods = '', qty = '', orderTotalQty = '', operator = '', time = '';
       if(st){
         const rec = latestByCode[l.code];
         if(rec){
           order = rec.order || '';
-          type = rec.type || '';
+          type = lang === 'en' ? (TYPE_TEXT[rec.type] || rec.type || '') : (rec.type || '');
           goods = rec.goods || '';
-          qty = rec.qty != null ? rec.qty : '';
+          qty = 1; // 每个库位固定占1个单位，不是订单总数量
+          orderTotalQty = rec.qty != null ? rec.qty : '';
           operator = rec.operator || '';
+          if(lang === 'en' && operator === '未填写') operator = 'Not filled';
           time = rec.time || '';
         }
       }
-      rows.push([l.zone, l.code, stText, order, type, goods, qty, operator, time]);
+      rows.push([l.zone, l.code, stText, order, type, goods, qty, orderTotalQty, operator, time]);
     });
 
     const csvEscape = (v) => {
@@ -830,7 +1019,7 @@ const db = initializeFirestore(fbApp, {
     const ymd = d.getFullYear().toString() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
     const a = document.createElement('a');
     a.href = url;
-    a.download = `库位详情_${ymd}.csv`;
+    a.download = lang === 'en' ? `location_details_${ymd}.csv` : `库位详情_${ymd}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -848,7 +1037,65 @@ const db = initializeFirestore(fbApp, {
     showToast('已重置全部库位状态', true);
   });
 
-  // ---------- init ----------
+  // ---------- 全屏显示（适合投在仓库大屏上）----------
+  const mapPane = document.getElementById('mapPane');
+  const btnFullscreen = document.getElementById('btnFullscreen');
+  const fsIcon = document.getElementById('fsIcon');
+  const fsLabel = document.getElementById('fsLabel');
+
+  function isFullscreen(){
+    return document.fullscreenElement === mapPane;
+  }
+
+  function rescaleGridForFullscreen(){
+    const wrapper = document.getElementById('gridScaleWrapper');
+    if(!isFullscreen()){
+      grid.style.transform = '';
+      wrapper.style.width = '';
+      wrapper.style.height = '';
+      return;
+    }
+    // 先重置，测出网格未缩放时的原始尺寸
+    grid.style.transform = 'none';
+    const gridRect = grid.getBoundingClientRect();
+    const legend = mapPane.querySelector('.legend');
+    const header = mapPane.querySelector('div');
+    const reservedHeight = (legend ? legend.offsetHeight : 0) + (header ? header.offsetHeight : 0) + 80;
+    const availWidth = window.innerWidth - 48;
+    const availHeight = window.innerHeight - reservedHeight;
+    const scale = Math.max(Math.min(availWidth / gridRect.width, availHeight / gridRect.height, 3), 0.3);
+    grid.style.transform = `scale(${scale})`;
+    // wrapper 尺寸设为缩放后的实际占位大小，这样外层 flex 居中才会准确，不会把内容推出屏幕
+    wrapper.style.width = (gridRect.width * scale) + 'px';
+    wrapper.style.height = (gridRect.height * scale) + 'px';
+  }
+
+  btnFullscreen.addEventListener('click', () => {
+    if(!isFullscreen()){
+      if(mapPane.requestFullscreen) mapPane.requestFullscreen();
+      else if(mapPane.webkitRequestFullscreen) mapPane.webkitRequestFullscreen();
+    } else {
+      if(document.exitFullscreen) document.exitFullscreen();
+      else if(document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }
+  });
+
+  document.addEventListener('fullscreenchange', () => {
+    if(isFullscreen()){
+      fsIcon.textContent = '⤫';
+      fsLabel.textContent = '退出全屏';
+      setTimeout(rescaleGridForFullscreen, 50);
+    } else {
+      fsIcon.textContent = '⛶';
+      fsLabel.textContent = '全屏显示';
+      grid.style.transform = '';
+      document.getElementById('gridScaleWrapper').style.width = '';
+      document.getElementById('gridScaleWrapper').style.height = '';
+    }
+  });
+  window.addEventListener('resize', () => {
+    if(isFullscreen()) rescaleGridForFullscreen();
+  });
   async function init(){
     buildStaticBlocks();
     buildLocationCells();
