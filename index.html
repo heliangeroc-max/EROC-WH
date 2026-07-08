@@ -230,27 +230,13 @@
 </head>
 <body>
 
-<div class="authOverlay" id="authOverlay">
-  <div class="authBox">
-    <h2 id="authTitle">邮箱登录</h2>
-    <div class="sub" id="authSub">输入邮箱，我们会发送一个登录链接到你的邮箱，点击链接即可登录，长期有效</div>
-    <div class="field" id="authEmailWrap">
-      <label>邮箱</label>
-      <input id="authEmail" type="email" placeholder="例如：zhangwei@company.com">
-    </div>
-    <button class="authBtn" id="authSubmit">发送登录链接</button>
-    <div class="authErr" id="authErr"></div>
-    <div class="authNote" id="authNote">登录链接由 Firebase 直接发送到你的邮箱，15 分钟内有效；点击链接会跳回本页面并自动完成登录，登录状态会保留在这台设备/浏览器上，不用每次重新输入。</div>
-  </div>
-</div>
-
 <div class="hazard-strip"></div>
 <div class="topbar">
   <h1>库位可视化管理<span>入库分配系统 · 布局图实时映射</span></h1>
   <div style="display:flex; align-items:center; gap:22px; flex-wrap:wrap;">
-    <div class="userTag" id="userTag" style="display:none;">
-      当前登录 <b id="curUserName"></b>
-      <button id="btnLogout">退出登录</button>
+    <div class="userTag" style="display:flex;">
+      操作人（可选）
+      <input id="operatorName" type="text" placeholder="填写你的名字，方便追溯记录" style="width:150px; background:#12161f; border:1px solid var(--border); color:var(--text); border-radius:5px; padding:5px 8px; font-size:12px;">
     </div>
     <div class="stats">
       <div class="stat"><div class="num" id="statTotal">--</div><div class="lbl">总库位</div></div>
@@ -262,7 +248,7 @@
   </div>
 </div>
 
-<div class="layout" id="mainLayout" style="display:none;">
+<div class="layout" id="mainLayout">
   <div class="mapPane">
     <h2>仓库布局图</h2>
     <div class="legend">
@@ -328,7 +314,10 @@
       <div class="zoneBars" id="zoneBars"></div>
     </div>
 
-    <button class="btn secondary" id="btnReset">重置全部占用状态</button>
+    <button class="btn" id="btnManualSave" style="margin-bottom:10px;">手动保存</button>
+    <button class="btn secondary" id="btnExport">导出库位详情（CSV）</button>
+    <button class="btn secondary" id="btnReset" style="margin-top:10px;">重置全部占用状态</button>
+    <div class="toast" id="saveToast"></div>
   </div>
 </div>
 
@@ -345,7 +334,6 @@
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
 import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-firestore.js";
-import { getAuth, sendSignInLinkToEmail, isSignInWithEmailLink, signInWithEmailLink, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-auth.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDaQFJwh4AmdTrZEEj_jOYXe3soPTV74gU",
@@ -357,7 +345,6 @@ const firebaseConfig = {
 };
 const fbApp = initializeApp(firebaseConfig);
 const db = getFirestore(fbApp);
-const auth = getAuth(fbApp);
 
 (function(){
   const WDATA = JSON.parse(document.getElementById('wdata-json').textContent);
@@ -376,7 +363,6 @@ const auth = getAuth(fbApp);
 
   let status = {};   // code -> 'occupied' | 'reserved' (absence = free)
   let log = [];      // [{id,time,order,goods,qty,zone,codes,type,operator}]
-  let accounts = {};  // username -> passwordHash
   let currentUser = null;
 
   const locByCode = {};
@@ -385,18 +371,7 @@ const auth = getAuth(fbApp);
   // ---------- Firebase / Firestore ----------
   const statusDocRef = doc(db, 'wms', 'status');
   const logDocRef = doc(db, 'wms', 'log');
-  const accountsDocRef = doc(db, 'wms', 'accounts');
 
-  async function loadAccounts(){
-    try{
-      const snap = await getDoc(accountsDocRef);
-      accounts = snap.exists() ? (snap.data().emails || {}) : {};
-    }catch(e){ console.error('loadAccounts failed', e); accounts = {}; }
-  }
-  async function saveAccounts(){
-    try{ await setDoc(accountsDocRef, { emails: accounts }); }
-    catch(e){ console.error('saveAccounts failed', e); }
-  }
   async function loadState(){
     try{
       const snap = await getDoc(statusDocRef);
@@ -590,106 +565,18 @@ const auth = getAuth(fbApp);
     });
   }
 
-  // ---------- auth (Firebase 邮箱链接免密码登录，长期有效) ----------
-  const authOverlay = document.getElementById('authOverlay');
-  const authErr = document.getElementById('authErr');
-  const authSubmit = document.getElementById('authSubmit');
-  const authSub = document.getElementById('authSub');
-  const authEmailWrap = document.getElementById('authEmailWrap');
-  const authNote = document.getElementById('authNote');
-
-  function isValidEmail(v){
-    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
-  }
-  function currentPageUrl(){
-    return window.location.origin + window.location.pathname;
-  }
-
-  async function registerAccount(email){
-    if(!accounts[email]){
-      accounts[email] = { firstSeen: new Date().toLocaleString('zh-CN') };
-      await saveAccounts();
-    }
-  }
-
-  authSubmit.addEventListener('click', async () => {
-    const email = document.getElementById('authEmail').value.trim().toLowerCase();
-    authErr.textContent = '';
-    if(!isValidEmail(email)){
-      authErr.textContent = '请输入有效的邮箱地址';
-      return;
-    }
-    authSubmit.disabled = true;
-    authSubmit.textContent = '发送中…';
+  // ---------- 操作人（可选，不做任何登录校验） ----------
+  const operatorInput = document.getElementById('operatorName');
+  function loadOperatorName(){
     try{
-      const actionCodeSettings = { url: currentPageUrl(), handleCodeInApp: true };
-      await sendSignInLinkToEmail(auth, email, actionCodeSettings);
-      window.localStorage.setItem('emailForSignIn', email);
-      authSub.textContent = `登录链接已发送至 ${email}，请查收邮件（包括垃圾邮件夹）并点击其中的链接完成登录。`;
-      authEmailWrap.style.display = 'none';
-      authSubmit.style.display = 'none';
-      authNote.textContent = '链接 15 分钟内有效。如果没收到，刷新本页面可以重新发送。';
-    }catch(e){
-      console.error(e);
-      authErr.textContent = '发送失败：' + (e.code || e.message || '请检查邮箱地址或稍后再试');
-      authSubmit.disabled = false;
-      authSubmit.textContent = '发送登录链接';
-    }
-  });
-  document.getElementById('authEmail').addEventListener('keydown', (e) => {
-    if(e.key === 'Enter') authSubmit.click();
-  });
-
-  async function completeSignInIfNeeded(){
-    if(isSignInWithEmailLink(auth, window.location.href)){
-      let email = window.localStorage.getItem('emailForSignIn');
-      if(!email){
-        email = window.prompt('请输入你登录时使用的邮箱地址以完成登录验证：');
-      }
-      try{
-        await signInWithEmailLink(auth, email, window.location.href);
-        window.localStorage.removeItem('emailForSignIn');
-        window.history.replaceState({}, document.title, currentPageUrl());
-      }catch(e){
-        console.error(e);
-        authErr.textContent = '登录链接无效或已过期，请重新输入邮箱获取新链接';
-      }
-    }
+      const saved = localStorage.getItem('wms-operator-name');
+      if(saved) operatorInput.value = saved;
+    }catch(e){}
+    currentUser = operatorInput.value.trim() || '未填写';
   }
-
-  function enterApp(){
-    authOverlay.style.display = 'none';
-    document.getElementById('mainLayout').style.display = '';
-    document.getElementById('userTag').style.display = 'flex';
-    document.getElementById('curUserName').textContent = currentUser;
-  }
-
-  function showLoginScreen(){
-    authOverlay.style.display = 'flex';
-    document.getElementById('mainLayout').style.display = 'none';
-    document.getElementById('userTag').style.display = 'none';
-    authEmailWrap.style.display = 'block';
-    authSubmit.style.display = 'block';
-    authSubmit.disabled = false;
-    authSubmit.textContent = '发送登录链接';
-    authSub.textContent = '输入邮箱，我们会发送一个登录链接到你的邮箱，点击链接即可登录，长期有效';
-    authNote.textContent = '登录链接由 Firebase 直接发送到你的邮箱，15 分钟内有效；点击链接会跳回本页面并自动完成登录，登录状态会保留在这台设备/浏览器上，不用每次重新输入。';
-    authErr.textContent = '';
-  }
-
-  document.getElementById('btnLogout').addEventListener('click', async () => {
-    try{ await signOut(auth); }catch(e){ console.error(e); }
-  });
-
-  onAuthStateChanged(auth, async (user) => {
-    if(user && user.email){
-      currentUser = user.email;
-      await registerAccount(currentUser);
-      enterApp();
-    } else {
-      currentUser = null;
-      showLoginScreen();
-    }
+  operatorInput.addEventListener('input', () => {
+    currentUser = operatorInput.value.trim() || '未填写';
+    try{ localStorage.setItem('wms-operator-name', operatorInput.value.trim()); }catch(e){}
   });
   function buildZoneOptions(){
     const sels = [document.getElementById('fZone'), document.getElementById('rZone')];
@@ -859,6 +746,77 @@ const auth = getAuth(fbApp);
     document.getElementById('rQty').value = 1;
   });
 
+  document.getElementById('btnManualSave').addEventListener('click', async () => {
+    const btn = document.getElementById('btnManualSave');
+    const t = document.getElementById('saveToast');
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = '保存中…';
+    try{
+      await setDoc(statusDocRef, { data: status });
+      await setDoc(logDocRef, { entries: log });
+      t.textContent = `✓ 已保存（${new Date().toLocaleTimeString('zh-CN')}）`;
+      t.className = 'toast ok';
+    }catch(e){
+      console.error('manual save failed', e);
+      t.textContent = '⚠ 保存失败：' + (e.code || e.message || '请检查网络后重试');
+      t.className = 'toast err';
+    }
+    btn.disabled = false;
+    btn.textContent = originalText;
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => { t.className = 'toast'; }, 3500);
+  });
+
+  document.getElementById('btnExport').addEventListener('click', () => {
+    // 找每个库位最近一次相关的记录（用于填充占用/预占用库位的货物、单号等信息）
+    const latestByCode = {};
+    log.forEach(r => {
+      const codes = r.codes || (r.code ? [r.code] : []);
+      codes.forEach(c => { latestByCode[c] = r; });
+    });
+
+    const STATUS_TEXT = { occupied: '占用', reserved: '预占用' };
+    const headers = ['区域', '库位编号', '状态', '关联单号', '记录类型', '货物/备注', '数量', '操作人', '记录时间'];
+    const rows = [headers];
+
+    LOCATIONS.forEach(l => {
+      const st = status[l.code];
+      const stText = STATUS_TEXT[st] || '空闲';
+      let order = '', type = '', goods = '', qty = '', operator = '', time = '';
+      if(st){
+        const rec = latestByCode[l.code];
+        if(rec){
+          order = rec.order || '';
+          type = rec.type || '';
+          goods = rec.goods || '';
+          qty = rec.qty != null ? rec.qty : '';
+          operator = rec.operator || '';
+          time = rec.time || '';
+        }
+      }
+      rows.push([l.zone, l.code, stText, order, type, goods, qty, operator, time]);
+    });
+
+    const csvEscape = (v) => {
+      const s = String(v == null ? '' : v);
+      if(/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+      return s;
+    };
+    const csvContent = rows.map(r => r.map(csvEscape).join(',')).join('\r\n');
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const d = new Date();
+    const ymd = d.getFullYear().toString() + String(d.getMonth()+1).padStart(2,'0') + String(d.getDate()).padStart(2,'0');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `库位详情_${ymd}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
   document.getElementById('btnReset').addEventListener('click', async () => {
     if(!confirm('确定要清空所有库位占用/预占用状态和全部记录吗？此操作不可撤销。')) return;
     status = {};
@@ -875,12 +833,11 @@ const auth = getAuth(fbApp);
     buildStaticBlocks();
     buildLocationCells();
     buildZoneOptions();
-    await loadAccounts();
+    loadOperatorName();
     await loadState();
     refreshAllVisuals();
     renderLog();
     document.getElementById('fOrder').placeholder = nextOrderNo('RK');
-    await completeSignInIfNeeded();
   }
   init();
 })();
