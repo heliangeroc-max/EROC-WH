@@ -432,7 +432,7 @@ const db = initializeFirestore(fbApp, {
     'Cancel order\ntermpory','OFFICE','Packing\narea','TV packing','TV welldone area','MATERIAL']);
 
   let status = {};   // code -> 'occupied' | 'reserved' (absence = free)
-  let log = [];      // [{id,time,order,goods,qty,zone,codes,type,operator}]
+  let log = [];      // [{id,time,order,goods,note,qty,zone,codes,type,operator}]
   let currentUser = null;
 
   const locByCode = {};
@@ -556,6 +556,13 @@ const db = initializeFirestore(fbApp, {
 
   const STATUS_LABEL = { occupied:'占用', reserved:'预占用', free:'空闲' };
 
+  function combineGoodsNote(goods, note){
+    if(goods && note) return `${goods}（${note}）`;
+    if(goods) return goods;
+    if(note) return note;
+    return '';
+  }
+
   function makeActionBtn(text, bg, color, onClick){
     const b = document.createElement('button');
     b.textContent = text;
@@ -588,7 +595,7 @@ const db = initializeFirestore(fbApp, {
       const rec = findLatestRecordForCode(code);
       if(rec){
         popDetails.innerHTML = `
-          <div><b style="color:var(--text)">${escapeHtml(rec.goods || '（无备注）')}</b></div>
+          <div><b style="color:var(--text)">${escapeHtml(combineGoodsNote(rec.goods, rec.note) || '（无备注）')}</b></div>
           <div>单号：${escapeHtml(rec.order || '—')}　订单总数量：${rec.qty != null ? rec.qty : '—'}</div>
           <div style="color:var(--muted2)">（本库位固定占1个单位；订单总数量是同一单号占用的库位总数）</div>
           <div>操作人：${escapeHtml(rec.operator || '未填写')}</div>
@@ -703,13 +710,8 @@ const db = initializeFirestore(fbApp, {
   });
   document.getElementById('popReserveConfirm').addEventListener('click', async () => {
     const code = popCurrentCode;
-    const goodsInput = popReserveGoods.value.trim();
-    const noteInput = popReserveNote.value.trim();
-    let goods;
-    if(goodsInput && noteInput) goods = `${goodsInput}（${noteInput}）`;
-    else if(goodsInput) goods = goodsInput;
-    else if(noteInput) goods = noteInput;
-    else goods = '预占用';
+    const goods = popReserveGoods.value.trim();
+    const note = popReserveNote.value.trim();
     if(status[code]){
       pop.style.display = 'none';
       showToast(`${code} 已不是空闲状态，操作已取消`, false);
@@ -719,7 +721,7 @@ const db = initializeFirestore(fbApp, {
     status[code] = 'reserved';
     log.push({
       id: Date.now(), time: new Date().toLocaleString('zh-CN'),
-      order, goods, qty: 1, zone: locByCode[code].zone, codes: [code],
+      order, goods, note, qty: 1, zone: locByCode[code].zone, codes: [code],
       type: '预占用', operator: currentUser
     });
     await saveStatus();
@@ -863,7 +865,7 @@ const db = initializeFirestore(fbApp, {
       html += `<tr>
         <td>${escapeHtml(r.order)}</td>
         <td>${typeHtml}</td>
-        <td>${escapeHtml(r.goods)}</td>
+        <td>${escapeHtml(combineGoodsNote(r.goods, r.note) || '预占用')}</td>
         <td>${r.qty}</td>
         <td class="code">${codesHtml}</td>
         <td>${escapeHtml(r.operator || '-')}</td>
@@ -974,13 +976,8 @@ const db = initializeFirestore(fbApp, {
 
   // ---------- reserve (预占用) submit ----------
   document.getElementById('btnReserve').addEventListener('click', async () => {
-    const goodsInput = document.getElementById('rGoods').value.trim();
-    const noteInput = document.getElementById('rNote').value.trim();
-    let goods;
-    if(goodsInput && noteInput) goods = `${goodsInput}（${noteInput}）`;
-    else if(goodsInput) goods = goodsInput;
-    else if(noteInput) goods = noteInput;
-    else goods = '预占用';
+    const goods = document.getElementById('rGoods').value.trim();
+    const note = document.getElementById('rNote').value.trim();
     const qty = parseInt(document.getElementById('rQty').value, 10) || 1;
     const zone = document.getElementById('rZone').value;
     const order = nextOrderNo('YZ');
@@ -999,7 +996,7 @@ const db = initializeFirestore(fbApp, {
     }
     const codes = result.codes;
     codes.forEach(c => { status[c] = 'reserved'; });
-    log.push({id: Date.now(), time: new Date().toLocaleString('zh-CN'), order, goods, qty, zone: zone || '不限', codes, type:'预占用', operator: currentUser});
+    log.push({id: Date.now(), time: new Date().toLocaleString('zh-CN'), order, goods, note, qty, zone: zone || '不限', codes, type:'预占用', operator: currentUser});
     await saveStatus();
     await saveLog();
     codes.forEach(c => refreshLocationVisual(c));
@@ -1058,20 +1055,21 @@ const db = initializeFirestore(fbApp, {
       : {};
 
     const headers = lang === 'en'
-      ? ['Zone', 'Location Code', 'Status', 'Order No.', 'Record Type', 'Goods / Note', 'Qty (This Location)', 'Order Total Qty', 'Operator', 'Timestamp']
-      : ['区域', '库位编号', '状态', '关联单号', '记录类型', '货物/备注', '数量（本库位）', '关联订单总数量', '操作人', '记录时间'];
+      ? ['Zone', 'Location Code', 'Status', 'Order No.', 'Record Type', 'Goods / SKU', 'Note', 'Qty (This Location)', 'Order Total Qty', 'Operator', 'Timestamp']
+      : ['区域', '库位编号', '状态', '关联单号', '记录类型', '货物/SKU', '备注', '数量（本库位）', '关联订单总数量', '操作人', '记录时间'];
     const rows = [headers];
 
     LOCATIONS.forEach(l => {
       const st = status[l.code];
       const stText = STATUS_TEXT[st] || FREE_TEXT;
-      let order = '', type = '', goods = '', qty = '', orderTotalQty = '', operator = '', time = '';
+      let order = '', type = '', goods = '', note = '', qty = '', orderTotalQty = '', operator = '', time = '';
       if(st){
         const rec = latestByCode[l.code];
         if(rec){
           order = rec.order || '';
           type = lang === 'en' ? (TYPE_TEXT[rec.type] || rec.type || '') : (rec.type || '');
           goods = rec.goods || '';
+          note = rec.note || '';
           qty = 1; // 每个库位固定占1个单位，不是订单总数量
           orderTotalQty = rec.qty != null ? rec.qty : '';
           operator = rec.operator || '';
@@ -1079,7 +1077,7 @@ const db = initializeFirestore(fbApp, {
           time = rec.time || '';
         }
       }
-      rows.push([l.zone, l.code, stText, order, type, goods, qty, orderTotalQty, operator, time]);
+      rows.push([l.zone, l.code, stText, order, type, goods, note, qty, orderTotalQty, operator, time]);
     });
 
     const csvEscape = (v) => {
