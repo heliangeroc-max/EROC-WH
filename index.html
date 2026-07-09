@@ -324,6 +324,10 @@
     <div class="card">
       <h2>预占用库位</h2>
       <div class="field">
+        <label>货物名称 / SKU（可选）</label>
+        <input id="rGoods" type="text" placeholder="例如：电视机A / SKU-1024">
+      </div>
+      <div class="field">
         <label>预占原因 / 备注</label>
         <input id="rNote" type="text" placeholder="例如：预留给大客户 / 货架维修">
       </div>
@@ -376,6 +380,14 @@
     <div style="display:flex; gap:6px;">
       <button id="popInboundConfirm" style="flex:1; background:var(--occ); color:#fff;">确认入库</button>
       <button id="popInboundCancel" style="flex:1; background:transparent; border:1px solid var(--border); color:var(--muted);">取消</button>
+    </div>
+  </div>
+  <div id="popReserveForm" style="display:none; margin-top:4px;">
+    <input id="popReserveGoods" type="text" placeholder="货物名称 / SKU（可选）" style="width:100%; background:#12161f; border:1px solid var(--border); color:var(--text); border-radius:5px; padding:7px 8px; font-size:12.5px; margin-bottom:8px;">
+    <input id="popReserveNote" type="text" placeholder="预占原因 / 备注（可选）" style="width:100%; background:#12161f; border:1px solid var(--border); color:var(--text); border-radius:5px; padding:7px 8px; font-size:12.5px; margin-bottom:8px;">
+    <div style="display:flex; gap:6px;">
+      <button id="popReserveConfirm" style="flex:1; background:var(--reserve); color:#241a05;">确认预占用</button>
+      <button id="popReserveCancel" style="flex:1; background:transparent; border:1px solid var(--border); color:var(--muted);">取消</button>
     </div>
   </div>
 </div>
@@ -594,7 +606,7 @@ const db = initializeFirestore(fbApp, {
     if(st === 'free'){
       popActions.appendChild(makeActionBtn('手动入库到此库位', 'var(--hazard)', '#1a1400', () => showInboundForm(code)));
       popActions.appendChild(makeActionBtn('标记为占用', 'var(--occ)', '#fff', () => setStatus(code, 'occupied')));
-      popActions.appendChild(makeActionBtn('标记为预占用', 'var(--reserve)', '#241a05', () => setStatus(code, 'reserved')));
+      popActions.appendChild(makeActionBtn('标记为预占用', 'var(--reserve)', '#241a05', () => showReserveForm(code)));
     } else if(st === 'reserved'){
       popActions.appendChild(makeActionBtn('转为正式占用', 'var(--occ)', '#fff', () => setStatus(code, 'occupied')));
       popActions.appendChild(makeActionBtn('释放为空闲', 'var(--free)', '#062', () => setStatus(code, 'free')));
@@ -615,23 +627,25 @@ const db = initializeFirestore(fbApp, {
     if(!pop.contains(ev.target) && !ev.target.classList.contains('loc')){
       pop.style.display = 'none';
       hideInboundForm();
+      hideReserveForm();
     }
   });
 
-  // ---------- 弹窗内嵌的“手动入库到此库位”小表单 ----------
+  // ---------- 弹窗内嵌的"手动入库到此库位"小表单 ----------
   const popInboundForm = document.getElementById('popInboundForm');
   const popGoods = document.getElementById('popGoods');
   function showInboundForm(code){
     popActions.style.display = 'none';
+    hideReserveForm(true);
     popInboundForm.style.display = 'block';
     popGoods.value = '';
     popGoods.focus();
   }
-  function hideInboundForm(){
+  function hideInboundForm(skipRestoreActions){
     popInboundForm.style.display = 'none';
-    popActions.style.display = 'flex';
+    if(!skipRestoreActions) popActions.style.display = 'flex';
   }
-  document.getElementById('popInboundCancel').addEventListener('click', hideInboundForm);
+  document.getElementById('popInboundCancel').addEventListener('click', () => hideInboundForm());
   popGoods.addEventListener('keydown', (e) => {
     if(e.key === 'Enter') document.getElementById('popInboundConfirm').click();
   });
@@ -666,6 +680,59 @@ const db = initializeFirestore(fbApp, {
     hideInboundForm();
     showToast(`已手动入库至 ${code}`, true);
   });
+
+  // ---------- 弹窗内嵌的"标记为预占用"小表单 ----------
+  const popReserveForm = document.getElementById('popReserveForm');
+  const popReserveGoods = document.getElementById('popReserveGoods');
+  const popReserveNote = document.getElementById('popReserveNote');
+  function showReserveForm(code){
+    popActions.style.display = 'none';
+    hideInboundForm(true);
+    popReserveForm.style.display = 'block';
+    popReserveGoods.value = '';
+    popReserveNote.value = '';
+    popReserveGoods.focus();
+  }
+  function hideReserveForm(skipRestoreActions){
+    popReserveForm.style.display = 'none';
+    if(!skipRestoreActions) popActions.style.display = 'flex';
+  }
+  document.getElementById('popReserveCancel').addEventListener('click', () => hideReserveForm());
+  popReserveNote.addEventListener('keydown', (e) => {
+    if(e.key === 'Enter') document.getElementById('popReserveConfirm').click();
+  });
+  document.getElementById('popReserveConfirm').addEventListener('click', async () => {
+    const code = popCurrentCode;
+    const goodsInput = popReserveGoods.value.trim();
+    const noteInput = popReserveNote.value.trim();
+    let goods;
+    if(goodsInput && noteInput) goods = `${goodsInput}（${noteInput}）`;
+    else if(goodsInput) goods = goodsInput;
+    else if(noteInput) goods = noteInput;
+    else goods = '预占用';
+    if(status[code]){
+      pop.style.display = 'none';
+      showToast(`${code} 已不是空闲状态，操作已取消`, false);
+      return;
+    }
+    const order = nextOrderNo('YZ');
+    status[code] = 'reserved';
+    log.push({
+      id: Date.now(), time: new Date().toLocaleString('zh-CN'),
+      order, goods, qty: 1, zone: locByCode[code].zone, codes: [code],
+      type: '预占用', operator: currentUser
+    });
+    await saveStatus();
+    await saveLog();
+    refreshLocationVisual(code);
+    updateStats();
+    updateZoneBars();
+    renderLog();
+    pop.style.display = 'none';
+    hideReserveForm();
+    showToast(`已将 ${code} 设为预占用`, true);
+  });
+
   async function setStatus(code, newStatus){
     const fromLabel = STATUS_LABEL[status[code] || 'free'];
     const toLabel = STATUS_LABEL[newStatus];
@@ -907,7 +974,13 @@ const db = initializeFirestore(fbApp, {
 
   // ---------- reserve (预占用) submit ----------
   document.getElementById('btnReserve').addEventListener('click', async () => {
-    const note = document.getElementById('rNote').value.trim() || '预占用';
+    const goodsInput = document.getElementById('rGoods').value.trim();
+    const noteInput = document.getElementById('rNote').value.trim();
+    let goods;
+    if(goodsInput && noteInput) goods = `${goodsInput}（${noteInput}）`;
+    else if(goodsInput) goods = goodsInput;
+    else if(noteInput) goods = noteInput;
+    else goods = '预占用';
     const qty = parseInt(document.getElementById('rQty').value, 10) || 1;
     const zone = document.getElementById('rZone').value;
     const order = nextOrderNo('YZ');
@@ -926,7 +999,7 @@ const db = initializeFirestore(fbApp, {
     }
     const codes = result.codes;
     codes.forEach(c => { status[c] = 'reserved'; });
-    log.push({id: Date.now(), time: new Date().toLocaleString('zh-CN'), order, goods: note, qty, zone: zone || '不限', codes, type:'预占用', operator: currentUser});
+    log.push({id: Date.now(), time: new Date().toLocaleString('zh-CN'), order, goods, qty, zone: zone || '不限', codes, type:'预占用', operator: currentUser});
     await saveStatus();
     await saveLog();
     codes.forEach(c => refreshLocationVisual(c));
@@ -935,9 +1008,11 @@ const db = initializeFirestore(fbApp, {
     renderLog();
     flashCells(codes);
     showReserveToast(`已预占 ${qty} 个库位：${codes.join('、')}`, true);
+    document.getElementById('rGoods').value = '';
     document.getElementById('rNote').value = '';
     document.getElementById('rQty').value = 1;
   });
+
 
   document.getElementById('btnManualSave').addEventListener('click', async () => {
     const btn = document.getElementById('btnManualSave');
