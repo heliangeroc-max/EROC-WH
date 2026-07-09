@@ -322,6 +322,44 @@
     </div>
 
     <div class="card">
+      <h2>批量导入入库安排</h2>
+      <div class="field">
+        <label>粘贴清单（每行一条：SKU,库位数,区域(可选)）</label>
+        <textarea id="batchInput" rows="6" placeholder="例如：
+电视机A,5,D1
+电视机B,3,D1-D3
+音响C,2,B1;B2;C1
+遥控器D,4" style="width:100%; background:#12161f; border:1px solid var(--border); color:var(--text); border-radius:5px; padding:8px 9px; font-size:12.5px; font-family:var(--mono); resize:vertical;"></textarea>
+        <div style="font-size:11px; color:var(--muted2); margin-top:6px; line-height:1.6;">
+          区域列支持：单个区域(D1)、范围(D1-D3，同字母前缀内)、多个区域用分号隔开(B1;B2;C1)，留空=全库自动分配。<br>
+          如果第一行是表头（SKU/库位数/区域，中英文均可），会自动跳过不当作数据处理。
+        </div>
+      </div>
+      <div class="field">
+        <label>或上传 CSV 文件（同样三列，表头可选）</label>
+        <input id="batchFile" type="file" accept=".csv,text/csv" style="width:100%; background:#12161f; border:1px solid var(--border); color:var(--text); border-radius:5px; padding:6px 8px; font-size:12px;">
+      </div>
+      <div style="margin-bottom:10px;">
+        <span id="btnDownloadTemplate" style="cursor:pointer; color:var(--accent); font-size:11.5px; text-decoration:underline;">下载导入模板（CSV）</span>
+      </div>
+      <button class="btn" id="btnBatchImport">开始批量导入</button>
+      <div class="toast" id="batchToast"></div>
+      <div id="batchResultWrap" style="display:none; margin-top:12px;">
+        <div style="font-size:11.5px; color:var(--muted); margin-bottom:6px;">导入结果</div>
+        <div style="max-height:220px; overflow-y:auto;">
+          <table style="width:100%; border-collapse:collapse; font-size:11.5px;">
+            <thead><tr>
+              <th style="text-align:left; color:var(--muted); font-weight:600; padding:4px;">货物/SKU</th>
+              <th style="text-align:left; color:var(--muted); font-weight:600; padding:4px;">结果</th>
+              <th style="text-align:left; color:var(--muted); font-weight:600; padding:4px;">库位/原因</th>
+            </tr></thead>
+            <tbody id="batchResultBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>预占用库位</h2>
       <div class="field">
         <label>货物名称 / SKU（可选）</label>
@@ -809,13 +847,53 @@ const db = initializeFirestore(fbApp, {
 
   // ---------- allocation ----------
   // 入库数量 = 需要占用的库位数量：按顺序找出 qty 个空闲库位（数量不足则不分配，返回可用空闲数供提示）
+  // zoneFilter 可以是 null（不限）、单个区域字符串，或区域数组（多区域池中一起找）
   function findFreeSlots(zoneFilter, qty){
-    const pool = zoneFilter ? LOCATIONS.filter(l => l.zone === zoneFilter) : LOCATIONS;
+    let pool;
+    if(!zoneFilter){
+      pool = LOCATIONS;
+    } else if(Array.isArray(zoneFilter)){
+      const zoneSet = new Set(zoneFilter);
+      pool = LOCATIONS.filter(l => zoneSet.has(l.zone));
+    } else {
+      pool = LOCATIONS.filter(l => l.zone === zoneFilter);
+    }
     const free = pool.filter(l => !status[l.code]);
     if(free.length < qty){
       return { ok:false, available: free.length };
     }
     return { ok:true, codes: free.slice(0, qty).map(l => l.code) };
+  }
+
+  // 解析区域字段：支持单个区域、分号分隔的多个区域、连字符范围（如 D1-D3）
+  function parseZoneField(raw){
+    if(!raw) return { zones: null, error: null };
+    const tokens = raw.split(/[;；]+/).map(s => s.trim()).filter(Boolean);
+    const result = new Set();
+    for(const token of tokens){
+      const rangeMatch = token.match(/^([A-Za-z]+)(\d+)-([A-Za-z]+)(\d+)$/);
+      if(rangeMatch){
+        const [, prefix1, n1, prefix2, n2] = rangeMatch;
+        if(prefix1.toUpperCase() !== prefix2.toUpperCase()){
+          return { zones: null, error: `范围"${token}"前缀不一致，需同一字母区（如 D1-D3）` };
+        }
+        const start = parseInt(n1, 10), end = parseInt(n2, 10);
+        if(start > end){
+          return { zones: null, error: `范围"${token}"起始编号大于结束编号` };
+        }
+        for(let i = start; i <= end; i++){
+          result.add(`${prefix1.toUpperCase()}${i}`);
+        }
+      } else {
+        result.add(token.toUpperCase());
+      }
+    }
+    const zones = [...result];
+    const invalid = zones.filter(z => !ZONES.includes(z));
+    if(invalid.length > 0){
+      return { zones: null, error: `区域不存在：${invalid.join('、')}` };
+    }
+    return { zones, error: null };
   }
 
   function showToast(msg, ok){
@@ -972,6 +1050,155 @@ const db = initializeFirestore(fbApp, {
     document.getElementById('fGoods').value = '';
     document.getElementById('fQty').value = 1;
     document.getElementById('fManualCodes').value = '';
+  });
+
+  // ---------- 批量导入入库安排 ----------
+  const HEADER_KEYWORDS = ['sku', '库位数', '数量', '货物', '区域', 'zone', 'qty', 'quantity', 'goods', 'code', '编号'];
+  function looksLikeHeaderRow(rawLine){
+    const lower = rawLine.toLowerCase();
+    return HEADER_KEYWORDS.some(k => lower.includes(k));
+  }
+
+  function parseBatchLines(text){
+    const rawLines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    if(rawLines.length > 0 && looksLikeHeaderRow(rawLines[0])){
+      rawLines.shift(); // 跳过表头行（中英文关键词识别）
+    }
+    return rawLines.map(line => {
+      const parts = line.split(/[,，\t]+/).map(s => s.trim());
+      return { raw: line, goods: parts[0] || '', qty: parts[1] || '', zone: parts[2] || '' };
+    });
+  }
+
+  document.getElementById('btnDownloadTemplate').addEventListener('click', () => {
+    const headers = ['SKU', '库位数', '区域'];
+    const examples = [
+      ['电视机A', '5', 'D1'],
+      ['电视机B', '3', 'D1-D3'],
+      ['音响C', '2', 'B1;B2;C1'],
+      ['遥控器D', '4', ''],
+    ];
+    const rows = [headers, ...examples];
+    const csvEscape = (v) => {
+      const s = String(v);
+      if(/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+      return s;
+    };
+    const csvContent = rows.map(r => r.map(csvEscape).join(',')).join('\r\n');
+    const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '批量导入模板.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  async function runBatchImport(lines){
+    const results = [];
+    for(const item of lines){
+      const goods = item.goods;
+      const qty = parseInt(item.qty, 10);
+
+      if(!goods){
+        results.push({ goods: item.raw, ok:false, msg:'缺少货物名称/SKU' });
+        continue;
+      }
+      if(!qty || qty < 1){
+        results.push({ goods, ok:false, msg:'数量无效（需为正整数）' });
+        continue;
+      }
+      const zoneRaw = item.zone;
+      const { zones, error: zoneError } = parseZoneField(zoneRaw);
+      if(zoneError){
+        results.push({ goods, ok:false, msg: zoneError });
+        continue;
+      }
+      const result = findFreeSlots(zones, qty);
+      if(!result.ok){
+        const scope = zones ? `指定区域（${zones.join('、')}）` : '全库';
+        results.push({ goods, ok:false, msg:`${scope}空闲库位不足（需要${qty}个，仅剩${result.available}个）` });
+        continue;
+      }
+      const codes = result.codes;
+      const order = nextOrderNo('RK');
+      codes.forEach(c => { status[c] = 'occupied'; });
+      log.push({
+        id: Date.now() + Math.random(), time: new Date().toLocaleString('zh-CN'),
+        order, goods, qty, zone: zones ? zones.join('、') : '不限', codes, type: '入库', operator: currentUser
+      });
+      results.push({ goods, ok:true, msg: codes.join('、') });
+    }
+    return results;
+  }
+
+  function renderBatchResults(results){
+    const wrap = document.getElementById('batchResultWrap');
+    const body = document.getElementById('batchResultBody');
+    wrap.style.display = 'block';
+    body.innerHTML = results.map(r => `<tr>
+      <td style="padding:5px 4px; border-bottom:1px solid #232a38;">${escapeHtml(r.goods)}</td>
+      <td style="padding:5px 4px; border-bottom:1px solid #232a38; color:${r.ok ? 'var(--free)' : 'var(--occ)'}; font-weight:700;">${r.ok ? '成功' : '失败'}</td>
+      <td style="padding:5px 4px; border-bottom:1px solid #232a38; font-family:var(--mono); font-size:11px;">${escapeHtml(r.msg)}</td>
+    </tr>`).join('');
+  }
+
+  document.getElementById('btnBatchImport').addEventListener('click', async () => {
+    const fileInput = document.getElementById('batchFile');
+    const toastEl = document.getElementById('batchToast');
+    function showBatchToast(msg, ok){
+      toastEl.textContent = msg;
+      toastEl.className = 'toast ' + (ok ? 'ok' : 'err');
+      clearTimeout(toastEl._timer);
+      toastEl._timer = setTimeout(() => { toastEl.className = 'toast'; }, 5000);
+    }
+
+    let text = document.getElementById('batchInput').value;
+    if(fileInput.files && fileInput.files[0]){
+      try{
+        text = await fileInput.files[0].text();
+      }catch(e){
+        showBatchToast('读取文件失败，请检查文件格式', false);
+        return;
+      }
+    }
+
+    const lines = parseBatchLines(text);
+    if(lines.length === 0){
+      showBatchToast('请粘贴清单内容或上传 CSV 文件', false);
+      return;
+    }
+    if(lines.length > 200){
+      showBatchToast(`一次最多导入200行，当前${lines.length}行，请分批导入`, false);
+      return;
+    }
+
+    const btn = document.getElementById('btnBatchImport');
+    btn.disabled = true;
+    btn.textContent = '导入中…';
+
+    const results = await runBatchImport(lines);
+    await saveStatus();
+    await saveLog();
+
+    LOCATIONS.forEach(l => refreshLocationVisual(l.code));
+    updateStats();
+    updateZoneBars();
+    renderLog();
+    renderBatchResults(results);
+
+    btn.disabled = false;
+    btn.textContent = '开始批量导入';
+
+    const okCount = results.filter(r => r.ok).length;
+    const failCount = results.length - okCount;
+    if(failCount === 0){
+      showBatchToast(`全部成功：共导入 ${okCount} 条`, true);
+    } else {
+      showBatchToast(`导入完成：成功 ${okCount} 条，失败 ${failCount} 条（详情见下方结果表）`, false);
+    }
   });
 
   // ---------- reserve (预占用) submit ----------
